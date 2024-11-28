@@ -1,0 +1,3 @@
+(executable
+ (name nonblocking_lwt_example)
+ (libraries mariadb lwt lwt.unix))

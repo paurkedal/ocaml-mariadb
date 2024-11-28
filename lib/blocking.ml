@@ -1,7 +1,7 @@
 open Util
 
 module B = Binding_wrappers
-module T = Ffi_bindings.Types(Ffi_generated_types)
+module T = Ffi_generated.Types
 
 module Time = Time
 module Field = Field
@@ -143,14 +143,15 @@ let rollback mariadb =
 let prepare mariadb query =
   let build_stmt raw =
     if B.mysql_stmt_prepare raw query then
-      match Common.Stmt.init mariadb raw with
-      | Some stmt -> Ok stmt
-      | None -> Error (Common.error mariadb)
+      Ok (Common.Stmt.init mariadb raw)
     else
       Error (Common.error mariadb) in
   match Common.stmt_init mariadb with
   | Some raw -> build_stmt raw
   | None -> Error (2008, "out of memory")
+
+let start_txn mariadb =
+  wrap_unit mariadb (B.mysql_real_query mariadb.Common.raw "START TRANSACTION")
 
 module Res = struct
   type t = [`Blocking] Common.Res.t
@@ -168,6 +169,9 @@ module Res = struct
 
   let affected_rows =
     Common.Res.affected_rows
+
+  let insert_id =
+    Common.Res.insert_id
 end
 
 module Stmt = struct
@@ -192,6 +196,7 @@ module Stmt = struct
     end
 
   let reset stmt =
+    Common.Stmt.free_meta stmt;
     let raw = stmt.Common.Stmt.raw in
     if B.mysql_stmt_free_result raw && B.mysql_stmt_reset raw then
       Ok ()
@@ -199,6 +204,7 @@ module Stmt = struct
       Error (Common.Stmt.error stmt)
 
   let close stmt =
+    Common.Stmt.free_meta stmt;
     let raw = stmt.Common.Stmt.raw in
     if B.mysql_stmt_free_result raw && B.mysql_stmt_close raw then
       Ok ()

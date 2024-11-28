@@ -77,6 +77,7 @@ module type S = sig
 
     val num_rows : t -> int
     val affected_rows : t -> int
+    val insert_id : t -> int
     val fetch : (module Row.S with type t = 'r) -> t -> 'r option result
   end
 
@@ -165,6 +166,7 @@ module type S = sig
   val set_server_option : t -> server_option -> unit result
   val ping : t -> unit result
   val autocommit : t -> bool -> unit result
+  val start_txn : t -> unit result
   val commit : t -> unit result
   val rollback : t -> unit result
   val prepare : t -> string -> Stmt.t result

@@ -1,8 +1,16 @@
 open Printf
 
-module Make (W : Mariadb.Nonblocking.Wait) = struct
-  module M = Mariadb.Nonblocking.Make (W)
-  open W.IO
+module type IO = sig
+  type 'a future
+  val (>>=) : 'a future -> ('a -> 'b future) -> 'b future
+  val return : 'a -> 'a future
+end
+
+module Make
+    (IO : IO)
+    (M : Mariadb.Nonblocking.S with type 'a future := 'a IO.future) =
+struct
+  open IO
 
   let (>|=) m f = m >>= fun x -> return (f x)
 
@@ -12,12 +20,21 @@ module Make (W : Mariadb.Nonblocking.Wait) = struct
     | Ok r -> return r
     | Error (i, e) -> eprintf "%s: (%d) %s\n%!" where i e; exit 2
 
+  let rec iter_s_list f = function
+    | [] -> return ()
+    | x :: xs -> f x >>= fun () -> iter_s_list f xs
+
+  let rec map_s_list f = function
+    | [] -> return []
+    | x :: xs -> f x >>= fun y -> map_s_list f xs >|= fun ys -> y :: ys
+
   let connect () =
     M.connect
       ~host:(env "OCAML_MARIADB_HOST" "localhost")
       ~user:(env "OCAML_MARIADB_USER" "root")
       ~pass:(env "OCAML_MARIADB_PASS" "")
-      ~db:(env "OCAML_MARIADB_DB" "mysql") ()
+      ~db:(env "OCAML_MARIADB_DB" "mysql")
+      ~port:(int_of_string (env "OCAML_MARIADB_PORT" "0")) ()
 
   let rec repeat n f =
     if n = 0 then return () else f () >>= fun () -> repeat (n - 1) f
@@ -30,7 +47,7 @@ module Make (W : Mariadb.Nonblocking.Wait) = struct
 
   let random_string () =
     let n = Random.int (1 lsl Random.int 8) in
-    String.init n (fun i -> "ACGT".[Random.int 4])
+    String.init n (fun _ -> "ACGT".[Random.int 4])
 
   let random_param_type _ =
     match Random.int 5 with
@@ -115,6 +132,71 @@ module Make (W : Mariadb.Nonblocking.Wait) = struct
       exit 2
     end
 
+  let execute_no_data stmt =
+    M.Stmt.execute stmt [||] >>= or_die "execute" >|= fun res ->
+    assert (M.Res.num_rows res = 0)
+
+  let fetch_single_row res =
+    assert (M.Res.num_rows res = 1);
+    M.Res.fetch (module M.Row.Array) res >>= or_die "fetch" >|= fun row ->
+    (match row with
+     | None -> failwith "expecting one row, no rows returned"
+     | Some a -> a)
+
+  let test_insert_id () =
+    connect () >>= or_die "connect" >>= fun dbh ->
+    M.prepare dbh
+      "CREATE TEMPORARY TABLE ocaml_mariadb_test \
+        (id integer PRIMARY KEY AUTO_INCREMENT)"
+      >>= or_die "prepare"
+      >>= fun create_table_stmt ->
+    execute_no_data create_table_stmt >>= fun () ->
+    M.prepare dbh "INSERT INTO ocaml_mariadb_test VALUES (DEFAULT)"
+      >>= or_die "prepare"
+      >>= fun insert_stmt ->
+    let rec check_inserts_from expected_id =
+      if expected_id > 5 then return () else
+      M.Stmt.execute insert_stmt [||] >>= or_die "insert" >>= fun res ->
+      assert (M.Res.num_rows res = 0);
+      assert (M.Res.insert_id res = expected_id);
+      check_inserts_from (expected_id + 1)
+    in
+    check_inserts_from 1 >>= fun () ->
+    M.close dbh
+
+  let test_txn () =
+    connect () >>= or_die "connect" >>= fun dbh ->
+
+    M.prepare dbh
+      "CREATE TEMPORARY TABLE ocaml_mariadb_test (i integer PRIMARY KEY)"
+      >>= or_die "prepare create_table_stmt"
+      >>= fun create_table_stmt ->
+    execute_no_data create_table_stmt >>= fun () ->
+
+    map_s_list (fun s -> M.prepare dbh s >>= or_die "prepare")
+      ["INSERT INTO ocaml_mariadb_test VALUES (1), (2)";
+       "INSERT INTO ocaml_mariadb_test SELECT i + 10 FROM ocaml_mariadb_test"]
+      >>= fun insert_stmts ->
+    M.prepare dbh "SELECT CAST(sum(i) AS integer) FROM ocaml_mariadb_test"
+      >>= or_die "prepare sum"
+      >>= fun sum_stmt ->
+
+    M.start_txn dbh >>= or_die "start_txn" >>= fun () ->
+    iter_s_list execute_no_data insert_stmts >>= fun () ->
+    M.rollback dbh >>= or_die "rollback" >>= fun () ->
+    M.Stmt.execute sum_stmt [||] >>= or_die "execute" >>= fun res ->
+    fetch_single_row res >>= fun row ->
+    assert (Array.length row = 1 && M.Field.null_value row.(0));
+
+    M.start_txn dbh >>= or_die "start_txn" >>= fun () ->
+    iter_s_list execute_no_data insert_stmts >>= fun () ->
+    M.commit dbh >>= or_die "rollback" >>= fun () ->
+    M.Stmt.execute sum_stmt [||] >>= or_die "execute" >>= fun res ->
+    fetch_single_row res >>= fun row ->
+    assert (Array.length row = 1 && M.Field.int row.(0) = 26);
+
+    M.close dbh
+
   (* Make sure the conversion between timestamps and strings are consistent
    * between MariaDB and OCaml. By sending timestamps to be compared as binary
    * and as string, this also verifies the MYSQL_TIME encoding. *)
@@ -133,7 +215,7 @@ module Make (W : Mariadb.Nonblocking.Wait) = struct
         assert (s = M.Field.(string s'))
      | _ -> assert false)
 
-  let test () =
+  let test_random_select () =
     let stmt_cache = Hashtbl.create 7 in
     connect () >>= or_die "connect" >>= fun dbh ->
     test_datetime_and_string_conv dbh >>= fun () ->
@@ -172,5 +254,86 @@ module Make (W : Mariadb.Nonblocking.Wait) = struct
       stmt_cache (return ()) >>= fun () ->
     M.close dbh
 
-  let main () = repeat 500 test
+  let test_many_select () = repeat 500 test_random_select
+
+  let test_integer, test_bigint =
+    let make_check type_ =
+      connect () >>= or_die "connect" >>= fun dbh ->
+      M.prepare dbh
+        (Printf.sprintf
+           "CREATE TEMPORARY TABLE ocaml_mariadb_test (id integer PRIMARY KEY \
+            AUTO_INCREMENT, value %s, value_unsigned %s unsigned)"
+           type_ type_)
+      >>= or_die "prepare create"
+      >>= fun create_table_stmt ->
+      execute_no_data create_table_stmt >>= fun () ->
+      let check (value : [ `Signed of int | `Unsigned of int ]) =
+        let column =
+          match value with
+          | `Signed _ -> "value"
+          | `Unsigned _ -> "value_unsigned"
+        in
+        M.prepare dbh
+          (Printf.sprintf "INSERT INTO ocaml_mariadb_test (%s) VALUES (?)"
+             column)
+        >>= or_die "prepare insert"
+        >>= fun insert_stmt ->
+        let value_to_insert =
+          match value with `Signed n -> n | `Unsigned n -> n
+        in
+        M.Stmt.execute insert_stmt [| `Int value_to_insert |]
+        >>= or_die "insert"
+        >>= fun res ->
+        M.prepare dbh
+          (Printf.sprintf "SELECT %s FROM ocaml_mariadb_test WHERE id = (?)"
+             column)
+        >>= or_die "prepare select"
+        >>= fun select_stmt ->
+        M.Stmt.execute select_stmt [| `Int (M.Res.insert_id res) |]
+        >>= or_die "Stmt.execute"
+        >>= M.Res.fetch (module M.Row.Array)
+        >>= or_die "Res.fetch"
+        >|= function
+        | Some [| inserted_value |] ->
+            assert_field_equal (`Int value_to_insert)
+              (`Int (M.Field.int inserted_value))
+        | _ -> assert false
+      in
+      return (dbh, check)
+    in
+    let test_integer () =
+      make_check "integer" >>= fun (dbh, check) ->
+      let input =
+        [
+          `Signed
+            (Int32.max_int |> Int32.to_int (* max value for integer column *));
+          `Signed
+            (Int32.min_int |> Int32.to_int (* min value for integer column *));
+          `Unsigned (Unsigned.UInt32.max_int |> Unsigned.UInt32.to_int)
+          (* max value for unsgined integer column.
+             Produces the following error: insert: (1264) Out of range value for column 'value_unsigned' at row 1 *);
+        ]
+      in
+      iter_s_list check input >>= fun () -> M.close dbh
+    in
+    let test_bigint () =
+      make_check "bigint" >>= fun (dbh, check) ->
+      let input =
+        [
+          `Signed Int.max_int
+          (* [Int.max_int] is below the max value for bigint column (which is equivalent to [Int64.max_int])
+             Produces the following error: Parameter (4611686018427387903 : int) came back as (-1 : int) *);
+          `Unsigned Int.max_int
+          (* insert: (1264) Out of range value for column 'value_unsigned' at row 1 *);
+        ]
+      in
+      iter_s_list check input >>= fun () -> M.close dbh
+    in
+    (test_integer, test_bigint)
+
+  let main () =
+    test_insert_id () >>= fun () ->
+    test_txn () >>= fun () ->
+    test_many_select () >>= fun () ->
+    test_integer () >>= fun () -> test_bigint ()
 end

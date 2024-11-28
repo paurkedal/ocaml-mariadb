@@ -1,6 +1,6 @@
 open Ctypes
 
-module T = Ffi_bindings.Types(Ffi_generated_types)
+module T = Ffi_generated.Types
 
 type t =
   { n : int
@@ -116,10 +116,10 @@ let short ?(unsigned = false) b param ~at =
     ~at
 
 let int ?(unsigned = false) b param ~at =
-  let p = allocate int param in
+  let p = allocate llong (Signed.LLong.of_int param) in
   bind b
-    ~buffer:(coerce (ptr int) (ptr void) p)
-    ~size:(sizeof int)
+    ~buffer:(coerce (ptr llong) (ptr void) p)
+    ~size:(sizeof llong)
     ~mysql_type:T.Type.long_long
     ~unsigned:(if unsigned then yes else no)
     ~at

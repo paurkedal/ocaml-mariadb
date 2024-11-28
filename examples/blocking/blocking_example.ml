@@ -42,24 +42,23 @@ let connect () =
 
 let stream res =
   let module F = struct exception E of M.error end in
-  let next _ =
+  let rec next () =
     match M.Res.fetch (module M.Row.Map) res with
-    | Ok (Some _ as row) -> row
-    | Ok None -> None
+    | Ok (Some x) -> Seq.Cons (x, next)
+    | Ok None -> Seq.Nil
     | Error e -> raise (F.E e) in
-  try Ok (Stream.from next)
-  with F.E e -> Error e
+  next
 
 let main () =
   let mariadb = connect () |> or_die "connect" in
   let query = env "OCAML_MARIADB_QUERY"
-    "SELECT * FROM mysql.user WHERE User LIKE ?" in
+    "SELECT * FROM mysql.user WHERE User LIKE ? AND ? < 0" in
   let stmt = M.prepare mariadb query |> or_die "prepare" in
-  let res = M.Stmt.execute stmt [| `String "r%" |] |> or_die "exec" in
+  let res = M.Stmt.execute stmt [| `String "r%"; `Int (-1) |] |> or_die "exec" in
   assert (M.Res.affected_rows res = M.Res.num_rows res);
   printf "#rows: %d\n%!" (M.Res.num_rows res);
-  let s = stream res |> or_die "stream" in
-  Stream.iter print_row s;
+  let s = stream res in
+  Seq.iter print_row s;
   M.Stmt.close stmt |> or_die "stmt close";
   M.close mariadb;
   M.library_end ();

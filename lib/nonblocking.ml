@@ -2,7 +2,7 @@ open Printf
 open Util
 
 module B = Binding_wrappers
-module T = Ffi_bindings.Types(Ffi_generated_types)
+module T = Ffi_generated.Types
 
 module Time = Time
 module Field = Field
@@ -177,10 +177,17 @@ let rollback_cont mariadb status =
 let rollback mariadb =
   (rollback_start mariadb, rollback_cont mariadb)
 
+let start_txn_start mariadb =
+  handle_int mariadb (B.mysql_real_query_start mariadb.Common.raw "START TRANSACTION")
+
+let start_txn_cont mariadb status =
+  handle_int mariadb (B.mysql_real_query_cont mariadb.Common.raw status)
+
+let start_txn mariadb =
+  (start_txn_start mariadb, start_txn_cont mariadb)
+
 let build_stmt mariadb raw =
-  match Common.Stmt.init mariadb raw with
-  | Some stmt -> `Ok stmt
-  | None -> `Error (Common.error mariadb)
+  `Ok (Common.Stmt.init mariadb raw)
 
 type prep_stmt =
   { raw   : B.stmt
@@ -193,7 +200,7 @@ let handle_prepare mariadb stmt = function
   | 0, _ -> `Error (Common.error mariadb)
   | s, _ -> `Wait (Status.of_int s)
 
-let prepare_start mariadb stmt query =
+let prepare_start mariadb stmt =
   handle_prepare mariadb stmt
     (B.mysql_stmt_prepare_start stmt.raw stmt.query stmt.len)
 
@@ -208,7 +215,7 @@ let prepare mariadb query =
         ; query = char_ptr_buffer_of_string query
         ; len   = String.length query
         } in
-      `Ok (prepare_start mariadb stmt query, prepare_cont mariadb stmt)
+      `Ok (prepare_start mariadb stmt, prepare_cont mariadb stmt)
   | None -> `Error (Common.error mariadb)
 
 module Res = struct
@@ -219,6 +226,9 @@ module Res = struct
 
   let affected_rows =
     Common.Res.affected_rows
+
+  let insert_id =
+    Common.Res.insert_id
 
   let handle_fetch (type t) (module R : Row.S with type t = t) res = function
     | 0, 0 ->
@@ -436,6 +446,7 @@ module type S = sig
 
     val num_rows : t -> int
     val affected_rows : t -> int
+    val insert_id : t -> int
     val fetch : (module Row.S with type t = 'r) -> t -> 'r option result future
   end
 
@@ -524,6 +535,7 @@ module type S = sig
   val set_server_option : t -> server_option -> unit result future
   val ping : t -> unit result future
   val autocommit : t -> bool -> unit result future
+  val start_txn : t -> unit result future
   val commit : t -> unit result future
   val rollback : t -> unit result future
   val prepare : t -> string -> Stmt.t result future
@@ -539,7 +551,6 @@ module Make (W : Wait) : S with type 'a future = 'a W.IO.future = struct
   let (>>=) = W.IO.(>>=)
   let return = W.IO.return
   let return_unit = return ()
-  let (>>|) fut f = fut >>= fun x -> return (f x)
 
   type flag = Common.flag =
     | Compress
@@ -626,6 +637,9 @@ module Make (W : Wait) : S with type 'a future = 'a W.IO.future = struct
     let affected_rows =
       Res.affected_rows
 
+    let insert_id =
+      Res.insert_id
+
     let free res =
       nonblocking res.Common.Res.mariadb (Res.free res)
   end
@@ -643,6 +657,7 @@ module Make (W : Wait) : S with type 'a future = 'a W.IO.future = struct
       | `Error e -> return (Error e)
 
     let free_res stmt =
+      Common.Stmt.free_meta stmt;
       let handle_free = function
         | 0, '\000' -> `Ok ()
         | 0, _ -> `Error (Common.Stmt.error stmt)
@@ -650,7 +665,6 @@ module Make (W : Wait) : S with type 'a future = 'a W.IO.future = struct
       let raw = stmt.Common.Stmt.raw in
       let start = handle_free (B.mysql_stmt_free_result_start raw) in
       let cont s = handle_free (B.mysql_stmt_free_result_cont raw s) in
-      let () = match stmt.Common.Stmt.meta with None -> () | Some { res; _ } -> B.mysql_free_result res in
       nonblocking stmt.Common.Stmt.mariadb (start, cont)
 
     let reset stmt =
@@ -711,6 +725,8 @@ module Make (W : Wait) : S with type 'a future = 'a W.IO.future = struct
   let ping m = nonblocking m (ping m)
 
   let autocommit m b = nonblocking m (autocommit m b)
+
+  let start_txn m = nonblocking m (start_txn m)
 
   let commit m = nonblocking m (commit m)
 

@@ -1,9 +1,3 @@
-_build/
-setup.data
-setup.log
+/_build/
 *.swp
-*.native
-*.byte
-*.docdir
-stubgen/ffi_stubgen.ml
-stubgen/ffi_types_stubgen.ml
+_opam

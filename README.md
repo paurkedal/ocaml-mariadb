@@ -20,13 +20,13 @@ the C connector library version 2.1.0 or greater (but version 3.0.0 or greater
 is recommended). If your distribution has these already packaged those versions,
 simply install either package. For example, on Debian or Ubuntu, run
 
-```sh
+```console
 # apt-get install libmariadbclient-dev
 ```
 
 to use the client library, or
 
-```sh
+```console
 # apt-get install libmariadb-dev
 ```
 
@@ -43,13 +43,13 @@ the client library will be available.
 
 To install OCaml-MariaDB via [OPAM](https://opam.ocaml.org/) simply type
 
-```sh
+```console
 $ opam install mariadb
 ```
 
 To install it manually, type
 
-```sh
+```console
 $ ./configure
 $ ocaml setup.ml -build
 $ ocaml setup.ml -install
@@ -80,10 +80,12 @@ let or_die = function
 
 let main () =
   let mariadb =
-    Mariadb.connect
+    M.connect
       ~host:"localhost"
       ~user:"myuser"
-      ~pass:"secret" |> or_die in
+      ~pass:"secret"
+      ()
+    |> or_die in
   let query = "SELECT * FROM mysql.users WHERE Host LIKE ? LIMIT ?" in
   let stmt = M.prepare mariadb query |> or_die in
   let res = M.Stmt.execute stmt [| `String "%"; `Int 10 |] |> or_die in
@@ -125,7 +127,6 @@ module type Wait = sig
   val wait : t -> Mariadb.Nonblocking.Status.t
           -> Mariadb.Nonblocking.Status.t IO.future
 end
-
 ```
 
 The `wait` function receives a *status* parameter that specifies which socket
@@ -150,10 +151,12 @@ module M = Mariadb.Nonblocking.Make(struct
 end)
 
 let main () =
-  Mariadb.connect
+  M.connect
     ~host:"localhost"
     ~user:"myuser"
-    ~pass:"secret" >>= or_die
+    ~pass:"secret"
+    ()
+  >>= or_die
   >>= fun mariadb ->
   let query = "SELECT * FROM mysql.users WHERE Host LIKE ? LIMIT ?" in
   M.prepare mariadb query >>= or_die
