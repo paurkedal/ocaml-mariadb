@@ -1,3 +1,13 @@
+## 2.0.0 - 2026-07-27
+
+  - Added support for signed and unsigned 64 bit integers (#66 by Mauricio
+    Fernández).
+  - Added some reasonable conversions for integer extractors, esp. to avoid
+    predicting the type in case of expressions.
+  - Added JSON type support (#69 by Javier Chavarri, jongleb, Gleb Patsiia,
+    and Petter A.  Urkedal).
+  - Fixed error reporting for blocking connect (#70 by Petter A. Urkedal).
+
 ## 1.3.0 - 2025-05-08
 
   - The `mariadb_config` and `mysql_config` scripts are now used, if
@@ -10,7 +20,7 @@
   - Avoid possibly blocking calls to `mysql_free_result` in the nonblocking
     implementation.  This was only an issue if a previous result set had not
     been consumed (#68 by Petter A. Urkedal, fixes #67).
-  - Fix memory leak in non-blocking test suite (Petter A.  Urkedal, fixes
+  - Fix memory leak in non-blocking test suite (Petter A. Urkedal, fixes
     #29).
 
 ## 1.2.0 - 2024-11-28
