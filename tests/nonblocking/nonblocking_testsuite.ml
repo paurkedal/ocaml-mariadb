@@ -274,7 +274,16 @@ struct
           assert (errno = 1064);
           return ()) >>= fun () ->
 
-    let n = 16 * 1024 in
+    M.prepare dbh "SELECT @@max_allowed_packet"
+      >>= or_die "prepare max_allowed_packet" >>= fun packet_stmt ->
+    M.Stmt.execute packet_stmt [||]
+      >>= or_die "execute max_allowed_packet" >>= fun res ->
+    fetch_single_row res >>= fun row ->
+    let max_packet = M.Field.int row.(0) in
+    M.Stmt.close packet_stmt
+      >>= or_die "Stmt.close max_allowed_packet" >>= fun () ->
+
+    let n = min (16 * 1024) (max_packet / 512) in
     let pad = String.make 256 'x' in
     let buf = Buffer.create (n * 280) in
     Buffer.add_string buf "INSERT INTO ocaml_mariadb_test (v, s) VALUES ";
@@ -321,6 +330,27 @@ struct
         M.Stmt.close control_stmt >>= or_die "Stmt.close control")
     >>= fun () ->
     M.Stmt.close status_stmt >>= or_die "Stmt.close status" >>= fun () ->
+    M.close dbh
+
+  let test_blob_roundtrip () =
+    connect () >>= or_die "connect" >>= fun dbh ->
+    M.exec dbh
+      "CREATE TEMPORARY TABLE ocaml_mariadb_test (id integer, data blob)"
+      >>= or_die "exec create" >>= fun _ ->
+    let blob = Bytes.init 4096 (fun i -> Char.chr (i land 0xff)) in
+    M.prepare dbh "INSERT INTO ocaml_mariadb_test (id, data) VALUES (?, ?)"
+      >>= or_die "prepare insert" >>= fun insert_stmt ->
+    M.Stmt.execute insert_stmt [|`Int 1; `Bytes blob|]
+      >>= or_die "insert" >>= fun res ->
+    assert (M.Res.affected_rows res = 1);
+    M.Stmt.close insert_stmt >>= or_die "Stmt.close insert" >>= fun () ->
+    M.prepare dbh "SELECT data FROM ocaml_mariadb_test WHERE id = ?"
+      >>= or_die "prepare select" >>= fun select_stmt ->
+    M.Stmt.execute select_stmt [|`Int 1|] >>= or_die "select" >>= fun res ->
+    fetch_single_row res >>= fun row ->
+    assert (Array.length row = 1);
+    assert (M.Field.bytes row.(0) = blob);
+    M.Stmt.close select_stmt >>= or_die "Stmt.close select" >>= fun () ->
     M.close dbh
 
   (* Make sure the conversion between timestamps and strings are consistent
@@ -555,6 +585,7 @@ struct
     test_txn () >>= fun () ->
     test_exec () >>= fun () ->
     test_exec_no_stmt_prepare () >>= fun () ->
+    test_blob_roundtrip () >>= fun () ->
     test_json () >>= fun () ->
     test_many_select () >>= fun () ->
     test_integer () >>= fun () -> test_bigint ()
